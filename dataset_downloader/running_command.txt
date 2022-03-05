@@ -1,0 +1,1 @@
+python HVU_download.py C:/Users/PC/Desktop/FewShotPhd/data_hvu/hvu_classes/val_df.csv D:/HolisticVideoUnderstanding/val -n 24
