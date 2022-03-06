@@ -42,7 +42,7 @@ class vae_visual_encoder(nn.Module):
         visual_modules = []
         
         # visual encoder
-        visual_modules.append(nn.Linear(1536,1100))
+        visual_modules.append(nn.Linear(1536,768))
         visual_modules.append(nn.ReLU())
         #visual_modules.append(nn.Linear(512, self.visual_latent_in*2))
         #visual_modules.append(nn.ReLU())
@@ -50,8 +50,8 @@ class vae_visual_encoder(nn.Module):
 
         
         self.visual_encoder = nn.Sequential(*visual_modules)
-        self.fc_mu_visual = nn.Linear(1100, latent_visual)
-        self.fc_logvar_visual = nn.Linear(1100, latent_visual)
+        self.fc_mu_visual = nn.Linear(768, latent_visual)
+        self.fc_logvar_visual = nn.Linear(768, latent_visual)
         
         self.apply(weights_init)
         
@@ -123,9 +123,7 @@ class vae_visual_decoder(nn.Module):
         visual_modules = []
         
         # visual decoder
-        visual_modules.append(nn.Linear(self.latent_visual_in,128))
-        visual_modules.append(nn.ReLU())
-        visual_modules.append(nn.Linear(128, 512))
+        visual_modules.append(nn.Linear(self.latent_visual_in,512))
         visual_modules.append(nn.ReLU())
         visual_modules.append(nn.Linear(512, 1024))
         visual_modules.append(nn.ReLU())
@@ -299,7 +297,7 @@ class vae(nn.Module):
         return distance.sum().mean()
 
 
-    def dist_aware_classification(self, mus=None, logvars=None, test_mus=None, test_logvars=None, n_way=None, k_shot=None, hidden_size=None, gt_tensor=None):
+    def dist_aware_classification(self, mus=None, logvars=None, test_mus=None, test_logvars=None, n_way=None, k_shot=None, hidden_size=None, k_shot_test=None, gt_tensor=None):
         
         # find the train elements' mu and logvar values
         # find the test elements' mu and logvar values
@@ -316,8 +314,8 @@ class vae(nn.Module):
         #####
         mus = mus.reshape((n_way*k_shot, hidden_size))
         logvars = logvars.reshape((n_way*k_shot, hidden_size))
-        test_mus = test_mus.reshape((n_way*k_shot, hidden_size))
-        test_logvars = test_logvars.reshape((n_way*k_shot, hidden_size))
+        test_mus = test_mus.reshape((n_way*k_shot_test, hidden_size))
+        test_logvars = test_logvars.reshape((n_way*k_shot_test, hidden_size))
         
         # smoothing term
         #####

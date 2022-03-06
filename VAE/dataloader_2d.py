@@ -34,7 +34,7 @@ class HVUDataset():
         self.samples_per_class = [os.listdir(os.path.join(self.folder_path, action_class)) for action_class in self.classes]
    
     # this function will return one n-way, k-shot set
-    def next_batch(self, n_batch=1):
+    def next_batch(self):
         
         # select class idx randomly; for example 1, 18, 24, 56 for 4-way
         selected_classes_idx = random.sample(range(0, self.nb_classes), self.n_way)

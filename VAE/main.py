@@ -1,17 +1,19 @@
 from itertools import cycle
 import os
-import re
 from sched import scheduler
 from statistics import mode
+from cv2 import mean
+from matplotlib import testing
 import numpy as np
 from tqdm import tqdm
 
 from dataloader_2d import HVUDataset
-#from distribution_aware_loss import loss_func
 import vae_2d
 import torch
 from torch.nn.functional import one_hot
 from torch import optim
+
+from sklearn.metrics import accuracy_score
 
 def initialize_seed(seed):
     np.random.seed(seed)
@@ -112,8 +114,8 @@ def loss_annealing(current_epoch):
          
 def train(tr_dataloader, model, optim, lr_scheduler, 
           n_way=None, k_shot=None, n_epoch=None, n_iter= None, n_iter_val = None,
-          val_dataloader=None, save_model_path=None, multimodal=None, hidden_size=None,
-          recons_coef = 1.0, kl_loss_coeff = 0.3, kl_beta = 0.5, cross_recons_coeff = 0.0, dist_align_coeff = 0.0, dist_aware_ce_coeff=1.0):
+          val_dataloader=None, save_model_path=None, multimodal=None, hidden_size=None, k_shot_test=None,
+          recons_coef = 1.0, kl_loss_coeff = 0.3, kl_beta = 0.5, cross_recons_coeff = 0.3, dist_align_coeff = 0.3, dist_aware_ce_coeff=0.5):
 
     # train the model with the prototypical learning algorithm
 
@@ -140,7 +142,7 @@ def train(tr_dataloader, model, optim, lr_scheduler,
         print('=== Learning Rate: {} ==='.format(lr_scheduler.get_last_lr()))
         model.train()
         
-        recons_coef, cross_recons_coeff, kl_loss_coeff, dist_align_coeff, dist_aware_ce_coeff = loss_annealing(epoch)
+        #recons_coef, cross_recons_coeff, kl_loss_coeff, dist_align_coeff, dist_aware_ce_coeff = loss_annealing(epoch)
         loss_coefficents = {"recons_coef":recons_coef, "cross_recons_coeff":cross_recons_coeff, "kl_loss_coeff":kl_loss_coeff, "dist_align_coeff":dist_align_coeff, "dist_aware_ce_coeff":dist_aware_ce_coeff}
         print(loss_coefficents)
         
@@ -205,7 +207,7 @@ def train(tr_dataloader, model, optim, lr_scheduler,
                 # dist. aware classification loss
                 dist_aware_result = model.dist_aware_classification(mus=model_result["mu_visual"], logvars=model_result["logvar_visual"]
                                                                                  , test_mus=model_result_test["mu_visual"], test_logvars=model_result_test["logvar_visual"]
-                                                                                 , n_way=n_way, k_shot=k_shot, hidden_size=hidden_size, gt_tensor=y_test_visual)
+                                                                                 , n_way=n_way, k_shot=k_shot, hidden_size=hidden_size, k_shot_test=k_shot_test, gt_tensor=y_test_visual)
                 
                 dist_ce_loss, predicted_labels = dist_aware_result["cross_entropy_loss"],dist_aware_result["predicted_labels"]
                 
@@ -259,7 +261,7 @@ def train(tr_dataloader, model, optim, lr_scheduler,
         if val_dataloader is None:
             continue
         else:
-            val_loss = validate(model, val_dataloader, n_iter_val, hidden_size, kl_loss_coeff, kl_beta, recons_coef, cross_recons_coeff, dist_align_coeff, dist_aware_ce_coeff, device)                  
+            val_loss = validate(model, val_dataloader, n_iter_val, hidden_size, kl_loss_coeff, kl_beta, recons_coef, cross_recons_coeff, dist_align_coeff, dist_aware_ce_coeff, device,k_shot_test)                  
             #val_acc.append(acc.item())
 
             avg_loss_val = np.mean(val_loss)
@@ -275,7 +277,7 @@ def train(tr_dataloader, model, optim, lr_scheduler,
 
     return best_state, train_loss, val_loss
 
-def validate(model, data_loader, n_iter, hidden_size, kl_loss_coeff, kl_beta, recons_coef, cross_recons_coeff, dist_align_coeff, dist_aware_ce_coeff, device):
+def validate(model, data_loader, n_iter, hidden_size, kl_loss_coeff, kl_beta, recons_coef, cross_recons_coeff, dist_align_coeff, dist_aware_ce_coeff, device, k_shot_test):
     val_loss = []
     model.eval()
     
@@ -336,7 +338,7 @@ def validate(model, data_loader, n_iter, hidden_size, kl_loss_coeff, kl_beta, re
             # dist. aware classification loss
             dist_aware_result = model.dist_aware_classification(mus=model_result["mu_visual"], logvars=model_result["logvar_visual"]
                                                                                 , test_mus=model_result_test["mu_visual"], test_logvars=model_result_test["logvar_visual"]
-                                                                                , n_way=n_way, k_shot=k_shot, hidden_size=hidden_size, gt_tensor=y_test_visual)
+                                                                                , n_way=n_way, k_shot=k_shot, hidden_size=hidden_size, k_shot_test=k_shot_test, gt_tensor=y_test_visual)
             
             dist_ce_loss, predicted_labels = dist_aware_result["cross_entropy_loss"],dist_aware_result["predicted_labels"]
              
@@ -378,6 +380,71 @@ def validate(model, data_loader, n_iter, hidden_size, kl_loss_coeff, kl_beta, re
 
     return val_loss
 
+def test(model, load_model_path, data_loader, n_way, k_shot, n_iter, hidden_size, k_shot_test, multimodal=True):
+    
+    # load the best model
+    model.load_state_dict(torch.load(load_model_path))
+    model.eval()
+    
+    device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+    model.to(device)
+    
+    # final acc results
+    test_accuracies = []
+    
+    # for each iteration
+    for iter in tqdm(range(n_iter)):
+        if multimodal:
+            #x_visual, x_textual  = tr_dataloader.next_batch()            
+            dataloader_result = data_loader.next_batch()  
+            x_visual, y_visual, x_test_visual, y_test_visual, x_textual, y_textual, x_test_textual, y_test_textual \
+                = dataloader_result["visual_data_train"], dataloader_result["visual_data_train_label"] \
+                , dataloader_result["visual_data_test"], dataloader_result["visual_data_test_label"] \
+                , dataloader_result["textual_data_train"], dataloader_result["textual_data_train_label"] \
+                , dataloader_result["textual_data_test"], dataloader_result["textual_data_test_label"]
+            
+            # for batch wise processing
+            x_visual = torch.stack(x_visual).to(device)
+            if len(x_test_visual) > 0:
+                x_test_visual = torch.stack(x_test_visual).to(device)
+            x_textual = torch.stack(x_textual).to(device)
+            if len(x_test_textual) > 0:
+                x_test_textual = torch.stack(x_test_textual).to(device)                
+            
+            y_visual = one_hot(torch.tensor(y_visual).long()).to(device)
+            if len(y_test_visual) > 0:
+                y_test_visual = torch.tensor(y_test_visual).long().to(device)
+            y_textual = one_hot(torch.tensor(y_textual).long()).to(device)
+            if len(y_test_textual) > 0:
+                y_test_textual = one_hot(torch.tensor(y_test_textual).long()).to(device)
+            
+            ######                            
+            # feed the all inputs to the model
+            ######
+            model_result = model(x_visual, x_textual)
+            model_result_test = model(x_test_visual, x_test_textual)
+            
+            dist_aware_result = model.dist_aware_classification(mus=model_result["mu_visual"], logvars=model_result["logvar_visual"]
+                                                                                 , test_mus=model_result_test["mu_visual"], test_logvars=model_result_test["logvar_visual"]
+                                                                                 , n_way=n_way, k_shot=k_shot, hidden_size=hidden_size, k_shot_test=k_shot_test, gt_tensor=y_test_visual)
+                
+            dist_ce_loss, predicted_labels = dist_aware_result["cross_entropy_loss"],dist_aware_result["predicted_labels"]
+            
+            gt = y_test_visual.cpu().detach().numpy()
+            y_hat = predicted_labels
+            
+            acc = accuracy_score(gt, y_hat)
+            test_accuracies.append(acc)
+                    
+        else: # TO.DO! For unimodal
+            x_visual = data_loader.next_batch()
+            x_visual = x_visual.to(device)
+    
+    # display the average acc score
+    print("Multimodal: {}".format(multimodal))
+    print("n-way: {} -- k-shot: {}".format(n_way, k_shot))
+    print("Average Acc: {:.3f}%".format(np.mean(np.array(test_accuracies))*100))
+    
     
 if __name__ == "__main__":
     
@@ -388,21 +455,25 @@ if __name__ == "__main__":
     k_shot = 5 # number of samples per class in one meta-learning setup
     n_test_per_class = 5 # how many test samples per class in one meta-learning setup
     n_epoch = 100 # number of epoch for all training
-    n_iter = 200 # how many samples will be used in just one epoch in training
-    n_iter_val = 200 #  how many samples will be used in just one epoch in validation
+    n_iter = 300 # how many samples will be used in just one epoch in training
+    n_iter_val = 300 #  how many samples will be used in just one epoch in validation
+    n_iter_test = 10 #  how many samples will be used in just one epoch in test
     base_lr = 0.00001 # base learning rate of cycle learning rate
     init_lr = 0.003 # maximum learning rate of cycle learning rate
     n_lr_up = 2 # it means, from base_lr -> init_lr takes n_lr_up epoch
     n_lr_down = 2 # it means, from init_lr -> base_lr takes n_lr_down epoch
     latent_size = 64
     multimodal = True # multimodal or unimodal
+    save_model_path = "C:/Users/PC/Desktop/FewShotPhd/model_hvu/vae_2d"
+    load_model_name = "best_model_0.7242006856203079.pth"
+    training_phase = False
     
     # set train, test, val dataloaders
     train_dataloader = init_dataset("C:/HolisticVideoUnderstanding/uniform_train", n_way, k_shot, n_test_per_class=n_test_per_class, multimodal=True, transform=None)
     test_dataloader = init_dataset("C:/HolisticVideoUnderstanding/uniform_test", n_way, k_shot, n_test_per_class=n_test_per_class,multimodal=True, transform=None)
     val_dataloader = init_dataset("C:/HolisticVideoUnderstanding/uniform_val", n_way, k_shot, n_test_per_class=n_test_per_class, multimodal=True, transform=None)
     
-    save_model_path = "C:/Users/PC/Desktop/FewShotPhd/model_hvu/vae_2d"
+    
     
     # delete txt logs if exists
     if os.path.exists(os.path.join(save_model_path, "avg_loss_val.txt")):
@@ -414,13 +485,21 @@ if __name__ == "__main__":
     model = init_model(latent_visual=latent_size, latent_textual=latent_size, multimodal=multimodal)
     optim = init_optim(init_lr=init_lr, model=model)
     lr_scheduler = init_lr_scheduler(optimizer=optim, base_lr=base_lr, max_lr=init_lr, n_iter=n_iter, n_up=n_lr_up, n_down=n_lr_down, n_epoch=n_epoch)          
-          
-    res = train(tr_dataloader=train_dataloader,
-                val_dataloader=val_dataloader,
-                model=model, optim=optim, lr_scheduler=lr_scheduler, 
-                n_way=n_way, k_shot=k_shot, n_epoch=n_epoch, n_iter= n_iter, n_iter_val=n_iter_val, hidden_size=latent_size,
-                save_model_path=save_model_path, multimodal=multimodal)#,
-                #recons_coef = 0, kl_loss_coeff = 0.0, kl_beta = 0.3, cross_recons_coeff = 0.0, dist_align_coeff = 0.0, dist_aware_ce_coeff=1.0)
     
+    if training_phase:
+        res = train(tr_dataloader=train_dataloader,
+                    val_dataloader=val_dataloader,
+                    model=model, optim=optim, lr_scheduler=lr_scheduler, 
+                    n_way=n_way, k_shot=k_shot, n_epoch=n_epoch, n_iter= n_iter, n_iter_val=n_iter_val, hidden_size=latent_size, k_shot_test=n_test_per_class,
+                    save_model_path=save_model_path, multimodal=multimodal)#,
+                    #recons_coef = 0, kl_loss_coeff = 0.0, kl_beta = 0.3, cross_recons_coeff = 0.0, dist_align_coeff = 0.0, dist_aware_ce_coeff=1.0)
     
-    best_state, train_loss, val_loss = res
+        best_state, train_loss, val_loss = res
+        
+        print("Best State: {}\nTraining Loss: {}\nVal Loss: {}".format(best_state, train_loss, val_loss))
+    
+    else:
+        load_model_path = os.path.join(save_model_path, load_model_name)
+        res = test(model= model, load_model_path= load_model_path, data_loader= test_dataloader, n_way= n_way, k_shot= k_shot, 
+                   n_iter= n_iter_test, hidden_size= latent_size, k_shot_test=n_test_per_class, multimodal= multimodal)   
+    
