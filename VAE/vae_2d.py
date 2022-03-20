@@ -42,7 +42,7 @@ class vae_visual_encoder(nn.Module):
         visual_modules = []
         
         # visual encoder
-        visual_modules.append(nn.Linear(1536,768))
+        visual_modules.append(nn.Linear(1920,960))
         visual_modules.append(nn.ReLU())
         #visual_modules.append(nn.Linear(512, self.visual_latent_in*2))
         #visual_modules.append(nn.ReLU())
@@ -50,8 +50,8 @@ class vae_visual_encoder(nn.Module):
 
         
         self.visual_encoder = nn.Sequential(*visual_modules)
-        self.fc_mu_visual = nn.Linear(768, latent_visual)
-        self.fc_logvar_visual = nn.Linear(768, latent_visual)
+        self.fc_mu_visual = nn.Linear(960, latent_visual)
+        self.fc_logvar_visual = nn.Linear(960, latent_visual)
         
         self.apply(weights_init)
         
@@ -123,11 +123,9 @@ class vae_visual_decoder(nn.Module):
         visual_modules = []
         
         # visual decoder
-        visual_modules.append(nn.Linear(self.latent_visual_in,512))
+        visual_modules.append(nn.Linear(self.latent_visual_in,960))
         visual_modules.append(nn.ReLU())
-        visual_modules.append(nn.Linear(512, 1024))
-        visual_modules.append(nn.ReLU())
-        visual_modules.append(nn.Linear(1024, 1536))
+        visual_modules.append(nn.Linear(960, 1920))
         visual_modules.append(nn.Sigmoid())
         
         
@@ -167,9 +165,7 @@ class vae_textual_decoder(nn.Module):
         textual_modules = []
         
         # visual encoder
-        textual_modules.append(nn.Linear(self.latent_textual_in,128))
-        textual_modules.append(nn.ReLU())
-        textual_modules.append(nn.Linear(128, 512))
+        textual_modules.append(nn.Linear(self.latent_textual_in,512))
         textual_modules.append(nn.ReLU())
         textual_modules.append(nn.Linear(512, 1024))
         textual_modules.append(nn.Sigmoid())
@@ -263,7 +259,7 @@ class vae(nn.Module):
 
     # reparameterization trick
     def reparameterize(self, mu, logvar):
-        std = logvar.mul(0.3).exp_()
+        std = logvar.mul(0.5).exp_()
         eps = Variable(std.new(std.size()).normal_(0, 1))
         
         return eps.mul(std).add_(mu)
@@ -282,19 +278,19 @@ class vae(nn.Module):
     ##############
     def reconstruction_loss(self, x, recon_x):
         # Mean absolute error for reconstruction
-        return self.l1_loss(x, recon_x)
+        return self.l2_loss(x, recon_x)
     
     
     def KL_loss(self, mu, logvar, kl_beta=0.5):
         # distribution convergence loss
-        self.kl = torch.mean(-1 * kl_beta * torch.sum(1 + logvar - mu ** 2 - logvar.exp()), dim = 0)
+        self.kl = torch.mean(-1 * kl_beta * torch.sum(1 + logvar - (mu ** 2 ) - logvar.exp()), dim = 0)
         
         return self.kl
      
         
     def distribution_alignment_loss(self, mu_1, mu_2, logvar_1, logvar_2):
         distance = torch.sqrt(torch.sum((mu_1 - mu_2) ** 2, dim=1) + torch.sum((torch.sqrt(logvar_1.exp()) - torch.sqrt(logvar_2.exp())) ** 2, dim=1))        
-        return distance.sum().mean()
+        return distance.sum()#.mean()
 
 
     def dist_aware_classification(self, mus=None, logvars=None, test_mus=None, test_logvars=None, n_way=None, k_shot=None, hidden_size=None, k_shot_test=None, gt_tensor=None):
@@ -320,6 +316,9 @@ class vae(nn.Module):
         # smoothing term
         #####
         alpha = 1 / k_shot
+        
+        logvars = torch.exp(logvars)
+        test_logvars = torch.exp(test_logvars)
         
         # final classification mu & logvar
         #####
@@ -352,23 +351,28 @@ class vae(nn.Module):
         #####
         test_pred_labels = []
         ce_loss_total = 0.0
+        local_similarities = []
         
         test_mus = test_mus.cpu().detach()
         test_logvars = test_logvars.cpu().detach()
 
         for i in range(len(test_mus)):
-            test_dist = torch.distributions.Normal(test_mus[i],test_logvars[i])
+            test_dist = torch.distributions.Normal(test_mus[i],np.sqrt(test_logvars[i]))
 
             local_scores = []
             for j in range(len(avg_train_mus)):
                 
                 # KL divergence
-                train_dist = torch.distributions.Normal(torch.Tensor(avg_train_mus[j]), torch.Tensor(avg_train_vars[j]))
+                train_dist = torch.distributions.Normal(torch.Tensor(avg_train_mus[j]), torch.Tensor(np.sqrt(avg_train_vars[j])))
                                 
-                scr = torch.distributions.kl_divergence(test_dist, train_dist).mean()
+                scr = torch.log(torch.distributions.kl_divergence(train_dist,test_dist).mean())
                 local_scores.append(scr)
-                            
-            local_similarities = torch.from_numpy(np.array([-1 * elem for elem in local_scores])).reshape(1,-1).to(0)
+            
+            # min of kl divergence for class decision
+            pred_cls_idx = np.argmin(local_scores)
+            test_pred_labels.append(pred_cls_idx)
+            
+            local_similarities.append(np.array([-1 * elem for elem in local_scores]).reshape(1,-1))
             
             """
             print(local_scores)
@@ -379,25 +383,20 @@ class vae(nn.Module):
             print(local_similarities.get_device())
             print(gt_tensor[i].get_device())
             """
-            # categorical cross entropy loss    
-            cc_loss = self.CE_loss(local_similarities, gt_tensor[i])
-            
-            # min of kl divergence for class decision
-            pred_cls_idx = np.argmin(local_scores)
-            
-            """
-            print("----------")
-            print(pred_cls_idx)
-            print(cc_loss)
-            print("----------")
-            """
-            ce_loss_total += cc_loss
-            test_pred_labels.append(pred_cls_idx)
         
-        # loss amount and classification accuracy calculation
-        # print(classification_report(gt, test_pred_labels))
+        local_similarities = torch.tensor(local_similarities).reshape(n_way*k_shot_test, n_way).to(0)
+        gt_tensor = gt_tensor.reshape(n_way*k_shot_test)
+        # categorical cross entropy loss    
+        cc_loss = self.CE_loss(local_similarities, gt_tensor)
         
-        return {"cross_entropy_loss": ce_loss_total / len(test_mus), "predicted_labels":test_pred_labels}
+        """
+        print("----------")
+        print(pred_cls_idx)
+        print(cc_loss)
+        print("----------")
+        """        
+                
+        return {"cross_entropy_loss": cc_loss, "predicted_labels":test_pred_labels}
         
     
 # unimodal - visual

@@ -73,7 +73,7 @@ class HVUDataset():
                 sample_path = os.path.join(class_path, os.listdir(class_path)[idx])
 
                 # read visual and textual feature (if needed)
-                visual_feature = np.load(os.path.join(sample_path, "InceptionResnetV2_MaxPooling.npz"))['InceptionResnetV2']
+                visual_feature = np.load(os.path.join(sample_path, "DenseNet_201.npz"))['DenseNet_201']
                 visual_feature = self.normalizer.fit_transform(visual_feature.reshape(-1, 1)).reshape(1,-1)
                 
                 visual_feature = torch.FloatTensor(visual_feature)
